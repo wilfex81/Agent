@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ride Request Chatbot</title>
+</head>
+<body>
+    <h2>Chat with RideBot</h2>
+    <div id="chatbox"></div>
+    <input type="text" id="messageInput" placeholder="Type your message...">
+    <button onclick="sendMessage()">Send</button>
+
+    <script>
+        const socket = new WebSocket("ws://localhost:8000/ws/chat/");
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            const chatbox = document.getElementById("chatbox");
+            chatbox.innerHTML += "<p>" + data.message + "</p>";
+        };
+
+        function sendMessage() {
+            const input = document.getElementById("messageInput");
+            socket.send(JSON.stringify({ message: input.value }));
+            input.value = "";
+        }
+    </script>
+</body>
+</html>
