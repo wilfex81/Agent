@@ -1,7 +1,8 @@
 from django.urls import path
 from django.shortcuts import render
-from .views import chat_view
+from .views import CreateRideRequestView, RideListView
 
 urlpatterns = [
-    path("chat/", chat_view, name="chat"),
+    path('rides/', RideListView.as_view(), name="ride-list"),
+    path('rides/create/', CreateRideRequestView.as_view(), name="create-ride"),
 ]

@@ -41,20 +41,19 @@ INSTALLED_APPS = [
     
     'django.contrib.staticfiles',
     
+    "phonenumber_field",
+    "fcm_django",
+    
     "channels",
     "rest_framework",
     "agent",
+    "users",
+    
 ]
 
-
-# WebSocket Layer
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
-    },
+FCM_DJANGO_SETTINGS = {
+    "FCM_SERVER_KEY": "YOUR_FCM_SERVER_KEY",  # Add your Firebase key here
 }
-
-ASGI_APPLICATION = "config.asgi.application"
 
 
 
