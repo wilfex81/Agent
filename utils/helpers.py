@@ -1,7 +1,11 @@
-from fcm_django.models import FCMDevice
+from firebase_admin import messaging
 
-def send_push_notification(user, title, message):
-    """Send a push notification to the user"""
-    devices = FCMDevice.objects.filter(user=user)
-    if devices.exists():
-        devices.send_message(title=title, body=message)
+def send_push_notification(token, title, body, data=None):
+    """Send a push notification via Firebase Cloud Messaging (FCM)."""
+    message = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        token=token,
+        data=data or {},
+    )
+    response = messaging.send(message)
+    print(f"FCM Notification Sent: {response}")
