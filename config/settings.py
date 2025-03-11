@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     
     "daphne", 
+    "django_celery_beat",
     
     'django.contrib.staticfiles',
     
@@ -50,6 +51,12 @@ INSTALLED_APPS = [
     "users",
     
 ]
+
+
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+
 
 FCM_DJANGO_SETTINGS = {
     "FCM_SERVER_KEY": "YOUR_FCM_SERVER_KEY",  # Add your Firebase key here
@@ -86,6 +93,8 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+
+ASGI_APPLICATION = 'config.routing.application'
 
 
 # Database

@@ -1,124 +1,154 @@
-from rest_framework import generics, status
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.utils.timezone import now
-from .models import RideRequest
-from .serializers import RideRequestSerializer
-from geopy.distance import geodesic 
-from users.models import User
 from rest_framework.views import APIView
-from utils.firebase_config import send_push_notification
+from rest_framework.response import Response
+from rest_framework import status
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+from .tasks import request_rider, assign_scheduled_rides, auto_cancel_unconfirmed_rides
+from .models import RideRequest
+from django.utils.timezone import now
+from datetime import timedelta
 
-def find_nearest_rider(pickup_lat, pickup_lon):
-    """Find the closest rider (hardcoded for now)"""
-    riders = [
-        {"id": 1, "name": "John Doe", "phone": "1234567890", "latitude": 6.525, "longitude": 3.380},
-        {"id": 2, "name": "Jane Smith", "phone": "0987654321", "latitude": 6.530, "longitude": 3.390},
-    ]
+# Passenger requests a ride
+class RideRequest(APIView):
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'passenger_lat': openapi.Schema(type=openapi.TYPE_NUMBER, description="Passenger's latitude"),
+                'passenger_lon': openapi.Schema(type=openapi.TYPE_NUMBER, description="Passenger's longitude"),
+                'price_offer': openapi.Schema(type=openapi.TYPE_NUMBER, description="Offered price for the ride"),
+            },
+            required=['passenger_lat', 'passenger_lon', 'price_offer']
+        ),
+        responses={200: "Ride request initiated."}
+    )
+    def post(self, request):
+        """
+        Handle the ride request from the passenger.
 
-    # Calculate distances
-    riders.sort(key=lambda rider: geodesic((pickup_lat, pickup_lon), (rider["latitude"], rider["longitude"])).km)
+        Args:
+            request (Request): The request object containing passenger's ride details.
 
-    return riders[0] if riders else None
+        Returns:
+            Response: A response object indicating the status of the ride request initiation.
+        """
+        passenger_lat = request.data.get("passenger_lat")
+        passenger_lon = request.data.get("passenger_lon")
+        price_offer = request.data.get("price_offer")
 
-class CreateRideRequestView(APIView):
-    """Passenger creates a ride request"""
-    def perform_create(self, serializer):
-        ride = serializer.save(passenger=self.request.user)
+        if not all([passenger_lat, passenger_lon, price_offer]):
+            return Response({"error": "All fields are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Simulate finding the nearest rider
-        pickup_lat, pickup_lon = 6.5244, 3.3792  # Hardcoded for now
-        nearest_rider = find_nearest_rider(pickup_lat, pickup_lon)
+        task = request_rider.delay(passenger_lat, passenger_lon, price_offer)
+        return Response({"message": "Ride request initiated.", "task_id": task.id}, status=status.HTTP_200_OK)
 
-        if nearest_rider:
-            ride.rider = User.objects.get(id=nearest_rider["id"])
+
+# Rider accepts a ride
+class RideAccept(APIView):
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'ride_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the ride request"),
+                'rider_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="Rider's ID accepting the ride"),
+            },
+            required=['ride_id', 'rider_id']
+        ),
+        responses={200: "Ride accepted successfully."}
+    )
+    def post(self, request):
+        """
+        Handle the acceptance of a ride by a rider.
+
+        Args:
+            request (Request): The request object containing ride acceptance details.
+
+        Returns:
+            Response: A response object indicating the status of the ride acceptance.
+        """
+        ride_id = request.data.get("ride_id")
+        rider_id = request.data.get("rider_id")
+
+        try:
+            ride = RideRequest.objects.get(id=ride_id, status="pending")
+            ride.rider_id = rider_id
             ride.status = "confirmed"
             ride.save()
+            return Response({"message": "Ride accepted successfully."}, status=status.HTTP_200_OK)
+        except RideRequest.DoesNotExist:
+            return Response({"error": "Ride not found or already assigned."}, status=status.HTTP_404_NOT_FOUND)
 
-            # Send notification to rider
-            rider_token = ride.rider.profile.fcm_token  # Assuming FCM tokens are stored in `profile`
-            send_push_notification(rider_token, "New Ride Request", "A passenger is requesting a ride!")
+class ScheduleRide(APIView):
+    def post(self, request):
+        """
+        Schedule a ride for a future time.
 
-        else:
-            ride.status = "cancelled"
-            ride.save()
+        Args:
+            request (Request): The request object containing ride scheduling details.
 
-        return Response({"message": "Ride request processed", "ride_id": ride.id}, status=status.HTTP_201_CREATED)
+        Returns:
+            Response: A response object indicating the status of the ride scheduling.
+        """
+        data = request.data
+        pickup_lat = data.get("pickup_lat")
+        pickup_lon = data.get("pickup_lon")
+        dropoff_lat = data.get("dropoff_lat")
+        dropoff_lon = data.get("dropoff_lon")
+        scheduled_time = data.get("scheduled_time")  # Frontend should send this in UTC format
 
+        if not all([pickup_lat, pickup_lon, dropoff_lat, dropoff_lon, scheduled_time]):
+            return Response({"error": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-class RideListView(APIView):
-    """Retrieve all rides for a passenger"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = RideRequestSerializer
+        ride = RideRequest.objects.create(
+            passenger=request.user,
+            pickup_lat=pickup_lat,
+            pickup_lon=pickup_lon,
+            dropoff_lat=dropoff_lat,
+            dropoff_lon=dropoff_lon,
+            scheduled_time=scheduled_time,
+            status="pending",
+        )
 
-    def get_queryset(self):
-        return RideRequest.objects.filter(passenger=self.request.user).order_by('-created_at')
+        #Immediately try to assign a rider
+        assign_scheduled_rides.delay()
 
-class NegotiatePriceView(APIView):
-    """Allows a rider to propose a new price"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = RideRequestSerializer
+        return Response(
+            {"message": "Ride scheduled successfully.", "ride_id": ride.id},
+            status=status.HTTP_201_CREATED,
+        )
 
-    def patch(self, request, *args, **kwargs):
-        ride = RideRequest.objects.get(id=kwargs["ride_id"])
+class CancelScheduledRide(APIView):
+    def post(self, request, ride_id):
+        """
+        Cancel a scheduled ride.
 
-        if ride.rider != request.user:
-            return Response({"error": "You are not assigned to this ride"}, status=status.HTTP_403_FORBIDDEN)
+        Args:
+            request (Request): The request object containing user details.
+            ride_id (int): The ID of the ride to be cancelled.
 
-        new_price = request.data.get("new_price")
-        ride.price = new_price
-        ride.status = "negotiation"
+        Returns:
+            Response: A response object indicating the status of the ride cancellation.
+        """
+        try:
+            ride = RideRequest.objects.get(id=ride_id, passenger=request.user, status="pending")
+        except RideRequest.DoesNotExist:
+            return Response({"error": "Ride not found or already assigned."}, status=status.HTTP_404_NOT_FOUND)
+
+        ride.status = "cancelled"
         ride.save()
 
-        # TODO: Notify passenger about the new price
-        return Response({"message": "New price proposed", "new_price": new_price}, status=status.HTTP_200_OK)
+        return Response({"message": "Scheduled ride cancelled successfully."}, status=status.HTTP_200_OK)
 
 
-class ScheduleRideView(APIView):
-    """Passenger schedules a ride"""
-    permission_classes = [IsAuthenticated]
-    serializer_class = RideRequestSerializer
+# Assign riders to scheduled rides (triggered periodically)
+class AssignScheduledRidesView(APIView):
+    def post(self, request):
+        task = assign_scheduled_rides.delay()
+        return Response({"message": "Scheduled rides assignment initiated.", "task_id": task.id}, status=status.HTTP_200_OK)
 
-    def post(self, serializer):
-        ride = serializer.save(passenger=self.request.user, status="pending")
-        return Response({"message": "Ride scheduled successfully", "ride_id": ride.id}, status=status.HTTP_201_CREATED)
 
-class AcceptRideView(generics.UpdateAPIView):
-    """Rider accepts a ride"""
-    permission_classes = [IsAuthenticated]
-
-    def patch(self, request, ride_id):
-        ride = RideRequest.objects.filter(id=ride_id, status="pending").first()
-        if not ride:
-            return Response({"error": "Ride not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        ride.rider = request.user
-        ride.status = "confirmed"
-        ride.save()
-
-        # Send notification to the passenger
-        send_push_notification(ride.passenger, "Ride Accepted", f"Your ride to {ride.dropoff_location} has been accepted!")
-
-        return Response({"message": "Ride accepted successfully"}, status=status.HTTP_200_OK)
-
-class NegotiateRideView(generics.UpdateAPIView):
-    """Rider negotiates the ride price"""
-    permission_classes = [IsAuthenticated]
-
-    def patch(self, request, ride_id):
-        ride = RideRequest.objects.filter(id=ride_id, status="pending").first()
-        if not ride:
-            return Response({"error": "Ride not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        new_price = request.data.get("new_price")
-        if not new_price or float(new_price) <= 0:
-            return Response({"error": "Invalid price"}, status=status.HTTP_400_BAD_REQUEST)
-
-        ride.price = float(new_price)
-        ride.status = "negotiation"
-        ride.save()
-
-        # Notify passenger about price negotiation
-        send_push_notification(ride.passenger, "Price Negotiation", f"Rider proposed a new price: ${ride.price}")
-
-        return Response({"message": "Price negotiation sent to passenger"}, status=status.HTTP_200_OK)
+# Auto-cancel unconfirmed scheduled rides
+class AutoCancelUnconfirmedRidesView(APIView):
+    def post(self, request):
+        task = auto_cancel_unconfirmed_rides.delay()
+        return Response({"message": "Auto-cancelation process started.", "task_id": task.id}, status=status.HTTP_200_OK)
